@@ -1,0 +1,41 @@
+
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Export Raw CSV (Selection Only)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:40px auto;max-width:880px;padding:0 16px;}
+    .row{display:flex;gap:16px;flex-wrap:wrap}
+    label{display:block;font-size:14px;color:#333;margin:8px 0 4px}
+    select,button{font-size:16px;padding:10px;border:1px solid #ccc;border-radius:8px}
+    button{background:#111;color:#fff;border:0;cursor:pointer}
+    .card{border:1px solid #eee;border-radius:12px;padding:16px;margin-top:20px;box-shadow:0 2px 8px rgba(0,0,0,.04)}
+    .muted{color:#666}
+  </style>
+</head>
+<body>
+  <h1>Export Raw CSV</h1>
+  <form class="card" method="post" action="/forms/classical/run">
+    <div class="row">
+      <div style="flex:1 1 280px">
+        <label>Parameter Name</label>
+        <select name="parameter" required>
+          {% for p in params %}<option value="{{p}}">{{p}}</option>{% endfor %}
+        </select>
+      </div>
+      <div style="flex:1 1 280px">
+        <label>State Name</label>
+        <select name="state" required>
+          {% for s in states %}<option value="{{s}}">{{s}}</option>{% endfor %}
+        </select>
+      </div>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button type="submit">Download CSV</button>
+    </div>
+    <p class="muted">The file will contain: <strong>forecast_id, forecast_name, date, value</strong>.</p>
+  </form>
+</body>
+</html>
