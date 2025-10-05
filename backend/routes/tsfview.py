@@ -1,8 +1,7 @@
 
 # backend/routes/tsfview.py
-# Version: 2025-10-05 v2.0
-# Returns **all columns** from engine.tsf_vw_full via v.*
-# Optional filters: forecast_id (uuid), date_from (YYYY-MM-DD), date_to (YYYY-MM-DD)
+# Version: 2025-10-05 v2.1
+# Adds GET "/" so /tsfview returns rows (not 404). Still provides /columns, /query, /export.
 
 from typing import Optional, List
 from fastapi import APIRouter
@@ -29,6 +28,16 @@ def _connect():
 
 def _parse_date(s: Optional[str]) -> Optional[dt.date]:
     return dt.date.fromisoformat(s) if s else None
+
+@router.get("/")
+def root(page_size: int = 100):
+    """Quick browse: first N rows of engine.tsf_vw_full (all columns)."""
+    limit = max(1, min(1000, int(page_size or 100)))
+    sql = "SELECT v.* FROM engine.tsf_vw_full v ORDER BY v.date ASC LIMIT %s"
+    with _connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(sql, [limit])
+        rows = [dict(r) for r in cur.fetchall()]
+    return {"rows": rows, "limit": limit}
 
 @router.get("/columns")
 def columns():
@@ -81,7 +90,7 @@ def query_all(
         cur.execute(sql, params + [limit, offset])
         rows = [dict(r) for r in cur.fetchall()]
 
-    return {"total": total, "rows": rows}
+    return {"total": total, "rows": rows, "page": page, "page_size": limit}
 
 @router.get("/export")
 def export_csv(
