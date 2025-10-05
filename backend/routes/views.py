@@ -1,17 +1,31 @@
-# backend/routes/views.py
-# Version: 2025-09-24 v4.1 (V11_14 views, fixed indentation)
-# Changes in this drop:
-# - Use quoted identifiers "ARIMA_M","HWES_M","SES_M" in SELECT/CSV to match uppercase columns.
-# - Bind date_from/date_to as Python date objects (no date>=text errors).
 
-from typing import Optional, Dict, List
-from fastapi import APIRouter, HTTPException, Query as FQuery
-from fastapi.responses import HTMLResponse, StreamingResponse
-import os, traceback, datetime as dt
+# backend/routes/views.py
+# Version: 2025-10-05 v6.0 — tsf_vw_full view with Month + Span UI
+# - Correct query (no joins): selects ONLY the required columns from engine.tsf_vw_full
+# - HTML form uses forecast_name, month (YYYY-MM from data), and span (1/2/3 months)
+# - Removes exact date inputs
+#
+# Endpoints:
+#   GET  /views/                 -> HTML page
+#   GET  /views/forecasts        -> ["NO2_Georgia", ...]
+#   GET  /views/months?forecast_name=NO2_Georgia -> ["2020-06","2020-07",...]
+#   POST /views/query            -> { total, rows: [...] }
+#   GET  /views/export           -> CSV download
+
+from typing import Optional, List, Dict, Tuple
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+import os, datetime as dt, calendar
 import psycopg
 from psycopg.rows import dict_row
 
 router = APIRouter(prefix="/views", tags=["views"])
+
+COLS = [
+    "forecast_name","date","value","model_name",
+    "fv","fv_mape","fv_mean_mape","fv_mean_mape_c",
+    "ci85_low","ci85_high","ci90_low","ci90_high","ci95_low","ci95_high"
+]
 
 def _db_url() -> str:
     return (
@@ -27,277 +41,240 @@ def _connect():
         raise RuntimeError("Database URL not configured")
     return psycopg.connect(dsn, autocommit=True)
 
-def _discover_views(conn) -> List[Dict[str,str]]:
-    sql = """
-    SELECT schemaname, viewname
-    FROM pg_catalog.pg_views
-    WHERE schemaname='engine'
-      AND viewname IN ('tsf_vw_full',
-                       'tsf_vw_daily_best_arima_a0',
-                       'tsf_vw_daily_best_ses_a0',
-                       'tsf_vw_daily_best_hwes_a0')
-    """
-    with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(sql)
-        rows = cur.fetchall()
-    return [dict(r) for r in rows]
+# ---------- helpers ----------
 
-def _exists(views, name: str) -> bool:
-    return any(v["schemaname"] == "engine" and v["viewname"] == name for v in views)
+def _ym_first(ym: str) -> dt.date:
+    # ym is "YYYY-MM"
+    y, m = ym.split("-")
+    return dt.date(int(y), int(m), 1)
 
-def _resolve_view(scope: str, model: Optional[str], series: Optional[str], views) -> str:
-    if not _exists(views, "tsf_vw_full"):
-        raise HTTPException(404, "V11_14 view engine.tsf_vw_full not found")
-    return "engine.tsf_vw_full"
+def _add_months(d: dt.date, n: int) -> dt.date:
+    y = d.year + (d.month - 1 + n) // 12
+    m = (d.month - 1 + n) % 12 + 1
+    day = 1
+    return dt.date(y, m, day)
 
-@router.get("/", response_class=HTMLResponse)
-def views_form():
-    html = r"""
-<!doctype html>
+def _range_from_month_span(ym: str, span: int) -> Tuple[dt.date, dt.date]:
+    span = 1 if span not in (1,2,3) else span
+    start = _ym_first(ym)
+    stop = _add_months(start, span)  # exclusive
+    return start, stop
+
+def _select_clause() -> str:
+    return ", ".join(COLS)
+
+# ---------- HTML ----------
+
+_HTML = """<!doctype html>
 <html>
-  <head>
-    <meta charset="utf-8">
-    <title>TSF — View (tsf_vw_full)</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-      body { margin:24px; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color:#111; }
-      .card { background:#f6f8fb; border:1px solid #dfe3ea; border-radius:10px; padding:16px; max-width:1100px; }
-      .row { display:flex; gap:14px; align-items:flex-end; flex-wrap:wrap; margin:12px 0; }
-      label { font-size:12px; color:#666; display:block; margin-bottom:4px; }
-      select,input[type=date] { padding:8px 10px; border:1px solid #dfe3ea; border-radius:8px; min-width:200px; }
-      .btn { padding:10px 14px; border-radius:8px; background:#111; color:white; border:none; cursor:pointer; }
-      .muted { color:#666; font-size:12px; }
-      table { border-collapse: collapse; width: 100%; margin-top: 10px; }
-      th, td { border:1px solid #e3e6eb; padding:6px 8px; font-size:13px; }
-      th { background:#f3f5f8; position: sticky; top: 0; }
-      #tableWrap { max-height: 72vh; overflow:auto; }
-    </style>
-  </head>
-  <body>
-    <div class="card">
-      <h2 style="margin:0 0 10px 0;">engine.tsf_vw_full</h2>
-      <div class="row">
-        <div>
-          <label for="fid">Forecast (forecast_name)</label>
-          <select id="fid"></select>
-        </div>
-        <div>
-          <label for="from">From</label>
-          <input type="date" id="from">
-        </div>
-        <div>
-          <label for="to">To</label>
-          <input type="date" id="to">
-        </div>
-        <div>
-          <button class="btn" id="load">Run</button>
-        </div>
-        <div>
-          <button class="btn" id="csv" data-href="" disabled>Download CSV</button>
-        </div>
+<head>
+  <meta charset="utf-8"/>
+  <title>engine.tsf_vw_full</title>
+  <style>
+    body{font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial; margin:24px;}
+    .card{border:1px solid #e5e7eb; border-radius:12px; padding:16px; max-width:1100px;}
+    .row{display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap;}
+    label{font-size:12px; color:#374151; display:block; margin-bottom:4px;}
+    select,button{padding:8px 10px; border:1px solid #d1d5db; border-radius:8px;}
+    table{border-collapse:collapse; width:100%; margin-top:12px; font-size:12px;}
+    th,td{border-top:1px solid #e5e7eb; padding:6px 8px; white-space:nowrap; text-align:left;}
+    th{background:#f9fafb; position:sticky; top:0;}
+    .actions{display:flex; gap:8px;}
+    .err{color:#b91c1c; margin-top:8px;}
+    .muted{color:#6b7280;}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>engine.tsf_vw_full</h2>
+    <div class="row">
+      <div>
+        <label>Forecast (forecast_name)</label>
+        <select id="forecast"></select>
       </div>
-      <div class="row"><div class="muted" id="status"></div></div>
-      <div id="tableWrap">
-        <table>
-          <thead><tr id="thead"></tr></thead>
-          <tbody id="tbody"></tbody>
-        </table>
+      <div>
+        <label>Month</label>
+        <select id="month"></select>
       </div>
+      <div>
+        <label>Span</label>
+        <select id="span">
+          <option value="1">1 month</option>
+          <option value="2">2 months</option>
+          <option value="3">3 months</option>
+        </select>
+      </div>
+      <div class="actions">
+        <button id="run">Run</button>
+        <button id="csv">Download CSV</button>
+      </div>
+      <div id="status" class="muted"></div>
     </div>
 
-    <script>
-      const SCOPE = () => 'global';
-      const el = (id) => document.getElementById(id);
-      const HEADERS = ["forecast_name","date","value","model_name","fv","fv_mape","fv_mean_mape","fv_mean_mape_c","ci85_low","ci85_high","ci90_low","ci90_high","ci95_low","ci95_high"];
+    <div style="overflow:auto; max-height:65vh">
+      <table>
+        <thead id="thead"></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+    <div id="error" class="err"></div>
+  </div>
 
-      function setStatus(msg){ el('status').textContent = msg; }
+<script>
+const COLS = %(cols_json)s;
 
-      async function ids(scope, model, series){
-        const q = new URLSearchParams({scope, model: model||'', series: series||''});
-        const r = await fetch('/views/ids?' + q.toString());
-        if(!r.ok) throw new Error('ids ' + r.status);
-        return r.json();
-      }
+function el(id){ return document.getElementById(id); }
 
-      function renderHead(){
-        el('thead').innerHTML = HEADERS.map(h => `<th>${h}</th>`).join('');
-      }
-      function renderRows(rows){
-        const body = el('tbody');
-        body.innerHTML = rows.map(r => {
-          return `<tr>${HEADERS.map(h => `<td>${(r[h] ?? '')}</td>`).join('')}</tr>`;
-        }).join('');
-      }
+function setHeaders(){
+  document.getElementById('thead').innerHTML = '<tr>' + COLS.map(h => `<th>${h}</th>`).join('') + '</tr>';
+}
 
-      function buildPayload(){
-        const fid = el('fid').value;
-        const from = el('from').value;
-        const to = el('to').value;
-        return {
-          scope: SCOPE(),
-          model: '',
-          series: '',
-          forecast_id: fid || null,
-          date_from: from || null,
-          date_to: to || null,
-          page: 1,
-          page_size: 2000
-        };
-      }
+async function fetchJSON(url){
+  const r = await fetch(url);
+  if(!r.ok) throw new Error(await r.text());
+  return r.json();
+}
 
-      function updateExportHref(){
-        const p = buildPayload();
-        if(!p.forecast_id){ el('csv').disabled = true; el('csv').dataset.href=''; return; }
-        const q = new URLSearchParams(Object.entries(p).filter(([k,v]) => v !== null && v !== ''));
-        el('csv').dataset.href = '/views/export?' + q.toString();
-        el('csv').disabled = false;
-      }
+async function postJSON(url, body){
+  const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  if(!r.ok) throw new Error(await r.text());
+  return r.json();
+}
 
-      async function doLoad(){
-        try{
-          setStatus('Loading…');
-          const payload = buildPayload();
-          const r = await fetch('/views/query', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(payload) });
-          if(!r.ok) throw new Error('query ' + r.status);
-          const data = await r.json();
-          renderRows(data.rows || []);
-          setStatus((data.total||0) + ' rows');
-          updateExportHref();
-        }catch(err){
-          console.error(err);
-          setStatus('Error: ' + err.message);
-        }
-      }
+async function loadForecasts(){
+  const data = await fetchJSON('/views/forecasts');
+  const s = el('forecast');
+  s.innerHTML = data.map(v => `<option value="${v}">${v}</option>`).join('');
+  await loadMonths();
+}
 
-      async function bootstrap(){
-        renderHead();
-        const list = await ids(SCOPE(), '', '');
-        el('fid').innerHTML = `<option value="" selected disabled>Select forecast…</option>` + list.map(x => `<option value="${x.id}">${x.name}</option>`).join('');
-      }
+async function loadMonths(){
+  const fid = el('forecast').value;
+  const data = await fetchJSON('/views/months?forecast_name=' + encodeURIComponent(fid));
+  const s = el('month');
+  s.innerHTML = data.map(v => `<option value="${v}">${v}</option>`).join('');
+}
 
-      document.addEventListener('DOMContentLoaded', () => {
-        el('load').addEventListener('click', doLoad);
-        el('csv').addEventListener('click', (ev) => {
-          const href = ev.currentTarget.dataset.href;
-          if(!href){ ev.preventDefault(); return; }
-          window.location.href = href;
-        });
-        bootstrap();
-      });
-    </script>
-  </body>
-</html>
-    """
-    return HTMLResponse(content=html)
+function renderRows(rows){
+  const tb = el('tbody');
+  tb.innerHTML = rows.map(r => '<tr>' + COLS.map(c => `<td>${(r[c] ?? '')}</td>`).join('') + '</tr>').join('');
+}
 
-@router.get("/ids")
-def ids(scope: str = FQuery(...), model: Optional[str] = None, series: Optional[str] = None, limit: int = 100):
-    try:
-        with _connect() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("""
-                SELECT fr.forecast_id AS id,
-                       COALESCE(fr.forecast_name, fr.forecast_id::text) AS name
-                FROM engine.forecast_registry fr
-                ORDER BY LOWER(fr.forecast_name) ASC LIMIT %s
-            """, (limit,))
-            rows = cur.fetchall()
-        return [{"id": str(r["id"]), "name": r["name"]} for r in rows]
-    except Exception as e:
-        return {"error": str(e), "trace": traceback.format_exc(), "ok": False, "step": "ids"}
+async function run(){
+  el('error').textContent = '';
+  el('status').textContent = 'Running...';
+  const payload = {
+    forecast_name: el('forecast').value,
+    month: el('month').value,
+    span: parseInt(el('span').value)
+  };
+  const out = await postJSON('/views/query', payload);
+  renderRows(out.rows);
+  el('status').textContent = `${out.rows.length} rows`;
+}
 
-from pydantic import BaseModel
+function downloadCSV(){
+  const qs = new URLSearchParams({
+    forecast_name: el('forecast').value,
+    month: el('month').value,
+    span: el('span').value
+  });
+  window.location = '/views/export?' + qs.toString();
+}
 
-class ViewsQueryBody(BaseModel):
-    scope: str
-    model: Optional[str] = None
-    series: Optional[str] = None
-    forecast_id: str
-    date_from: Optional[str] = None
-    date_to: Optional[str] = None
-    page: int = 1
-    page_size: int = 2000
+document.addEventListener('DOMContentLoaded', async () => {
+  setHeaders();
+  await loadForecasts();
+  el('forecast').addEventListener('change', loadMonths);
+  el('run').addEventListener('click', run);
+  el('csv').addEventListener('click', downloadCSV);
+});
+</script>
+</body></html>
+"""
 
-def _d(s: Optional[str]) -> Optional[dt.date]:
-    if not s: return None
-    return dt.date.fromisoformat(s)
+@router.get("/", response_class=HTMLResponse)
+def page():
+    html = _HTML % {"cols_json": COLS}
+    return HTMLResponse(html)
+
+# API helpers for UI
+
+@router.get("/forecasts")
+def forecasts():
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT forecast_name FROM engine.tsf_vw_full ORDER BY 1")
+        return [r[0] for r in cur.fetchall()]
+
+@router.get("/months")
+def months(forecast_name: str):
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT to_char(date_trunc('month', date), 'YYYY-MM') AS ym
+            FROM engine.tsf_vw_full
+            WHERE forecast_name = %s
+            GROUP BY ym
+            ORDER BY ym
+        """, [forecast_name])
+        return [r[0] for r in cur.fetchall()]
+
+# Query + CSV
 
 @router.post("/query")
-def run_query(body: ViewsQueryBody):
-    if not body.forecast_id:
-        raise HTTPException(400, "forecast_id required")
+def query(payload: Dict):
+    forecast_name = payload.get("forecast_name") or ""
+    month = payload.get("month") or ""
+    span = int(payload.get("span") or 1)
 
-    limit = max(1, min(10000, int(body.page_size or 2000)))
-    offset = max(0, (max(1, int(body.page or 1))-1) * limit)
+    if not forecast_name or not month:
+        raise HTTPException(status_code=400, detail="forecast_name and month are required")
 
-    with _connect() as conn:
-        views = _discover_views(conn)
-        vname = _resolve_view(body.scope, body.model, body.series, views)
+    start, stop = _range_from_month_span(month, span)
 
-        conds = ["fr.forecast_id = %s"]
-        params = [body.forecast_id]
-        if body.date_from:
-            conds.append("v.date >= %s")
-            params.append(_d(body.date_from))
-        if body.date_to:
-            conds.append("v.date <= %s")
-            params.append(_d(body.date_to))
+    sql = f"""
+        SELECT { _select_clause() }
+        FROM engine.tsf_vw_full
+        WHERE forecast_name = %s
+          AND date >= %s AND date < %s
+        ORDER BY date ASC
+    """
 
-        cols = 'forecast_name, date, value, model_name, fv, fv_mape, fv_mean_mape, fv_mean_mape_c, ci85_low, ci85_high, ci90_low, ci90_high, ci95_low, ci95_high'
-        where_clause = " AND ".join(conds)
-        sql = f'SELECT {cols} FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE {where_clause} ORDER BY date ASC LIMIT %s OFFSET %s'
-        cnt = f'SELECT COUNT(*) AS n FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE {where_clause}'
-
-        with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(cnt, params)
-            total = int(cur.fetchone()["n"])
-            cur.execute(sql, params + [limit, offset])
-            rows = cur.fetchall()
-
-    return {"rows": rows, "total": total}
+    with _connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(sql, [forecast_name, start, stop])
+        rows = [dict(r) for r in cur.fetchall()]
+    return {"rows": rows, "total": len(rows)}
 
 @router.get("/export")
-def export_csv(scope: str, model: Optional[str] = None, series: Optional[str] = None,
-               forecast_id: str = FQuery(...), date_from: Optional[str] = None, date_to: Optional[str] = None):
-    with _connect() as conn:
-        views = _discover_views(conn)
-        vname = _resolve_view(scope, model, series, views)
+def export(forecast_name: str, month: str, span: int = 1):
+    start, stop = _range_from_month_span(month, int(span))
 
-        conds = ["fr.forecast_id = %s"]
-        params = [forecast_id]
-        if date_from:
-            conds.append("v.date >= %s")
-            params.append(_d(date_from))
-        if date_to:
-            conds.append("v.date <= %s")
-            params.append(_d(date_to))
+    sql = f"""
+        SELECT { _select_clause() }
+        FROM engine.tsf_vw_full
+        WHERE forecast_name = %s
+          AND date >= %s AND date < %s
+        ORDER BY date ASC
+    """
 
-        cols = ['forecast_name','date','value','model_name','fv','fv_mape','fv_mean_mape','fv_mean_mape_c','ci85_low','ci85_high','ci90_low','ci90_high','ci95_low','ci95_high']
-        base = f"FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE " + " AND ".join(conds)
-        sql = f"SELECT {', '.join(cols)} " + base + " ORDER BY date ASC"
+    def row_iter():
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(sql, [forecast_name, start, stop])
+            headers = [d.name for d in cur.description]
+            yield (",".join(headers) + "\\n").encode("utf-8")
+            for rec in cur:
+                out = []
+                for val in rec:
+                    if val is None:
+                        out.append("")
+                    elif isinstance(val, (dt.date, dt.datetime)):
+                        out.append(val.isoformat())
+                    else:
+                        s = str(val)
+                        if any(ch in s for ch in [",","\\n",'"']):
+                            s = '"' + s.replace('"','""') + '"'
+                        out.append(s)
+                yield (",".join(out) + "\\n").encode("utf-8")
 
-        def row_iter():
-            headers = ["forecast_name","date","value","model_name","fv","fv_mape","fv_mean_mape","fv_mean_mape_c","ci85_low","ci85_high","ci90_low","ci90_high","ci95_low","ci95_high"]
-            yield (",".join(headers) + "\n").encode("utf-8")
-            with conn.cursor() as cur:
-                cur.execute(sql, params)
-                for rec in cur:
-                    line = []
-                    for v in rec:
-                        if v is None:
-                            line.append("")
-                        elif isinstance(v, dt.date):
-                            line.append(v.isoformat())
-                        else:
-                            s = str(v)
-                            if any(ch in s for ch in [',','\n','"']):
-                                s = '"' + s.replace('"','""') + '"'
-                            line.append(s)
-                    yield (",".join(line) + "\n").encode("utf-8")
-
-        fname_bits = [scope or 'view']
-        if model: fname_bits.append(model)
-        if series: fname_bits.append(series.upper())
-        if forecast_id: fname_bits.append(str(forecast_id))
-        filename = "tsf_export_" + "_".join(fname_bits) + ".csv"
-        return StreamingResponse(row_iter(), media_type="text/csv",
-                                 headers={"Content-Disposition": f"attachment; filename={filename}"})
+    fname = f"tsf_vw_full_{forecast_name}_{month}_x{span}.csv".replace(" ","_")
+    return StreamingResponse(row_iter(), media_type="text/csv",
+                             headers={"Content-Disposition": f'attachment; filename="{fname}"'})
