@@ -15,7 +15,7 @@
 from typing import Optional, List, Dict, Tuple
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
-import os, datetime as dt, calendar
+import os, datetime as dt, json
 import psycopg
 from psycopg.rows import dict_row
 
@@ -195,7 +195,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 @router.get("/", response_class=HTMLResponse)
 def page():
-    html = _HTML % {"cols_json": COLS}
+    html = _HTML % {"cols_json": json.dumps(COLS)}
     return HTMLResponse(html)
 
 # API helpers for UI
