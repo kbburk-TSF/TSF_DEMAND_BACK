@@ -108,7 +108,7 @@ def views_form():
     <script>
       const SCOPE = () => 'global';
       const el = (id) => document.getElementById(id);
-      const HEADERS = ["date","value","ARIMA_M","HWES_M","SES_M","model_name","fv_l","fv","fv_u","fv_mean_mape","fv_mean_mape_c","fv_interval_odds","fv_interval_sig","fv_variance","fv_variance_mean","low","high"];
+      const HEADERS = ["forecast_name","date","value","model_name","fv","fv_mape","fv_mean_mape","fv_mean_mape_c","ci85_low","ci85_high","ci90_low","ci90_high","ci95_low","ci95_high"];
 
       function setStatus(msg){ el('status').textContent = msg; }
 
@@ -242,7 +242,7 @@ def run_query(body: ViewsQueryBody):
             conds.append("v.date <= %s")
             params.append(_d(body.date_to))
 
-        cols = 'date, value, "ARIMA_M", "HWES_M", "SES_M", model_name, fv_l, fv, fv_u, fv_mean_mape, fv_interval_odds, fv_interval_sig, fv_variance, fv_variance_mean, fv_mean_mape_c, low, high'
+        cols = 'fr.forecast_name AS forecast_name, date, value, model_name, fv, fv_mape, fv_mean_mape, fv_mean_mape_c, ci85_low, ci85_high, ci90_low, ci90_high, ci95_low, ci95_high'
         where_clause = " AND ".join(conds)
         sql = f'SELECT {cols} FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE {where_clause} ORDER BY date ASC LIMIT %s OFFSET %s'
         cnt = f'SELECT COUNT(*) AS n FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE {where_clause}'
@@ -271,12 +271,12 @@ def export_csv(scope: str, model: Optional[str] = None, series: Optional[str] = 
             conds.append("v.date <= %s")
             params.append(_d(date_to))
 
-        cols = ['date','value','"ARIMA_M"','"HWES_M"','"SES_M"','model_name','fv_l','fv','fv_u','fv_mean_mape','fv_interval_odds','fv_interval_sig','fv_variance','fv_variance_mean','fv_mean_mape_c','low','high']
+        cols = ['fr.forecast_name AS forecast_name','date','value','model_name','fv','fv_mape','fv_mean_mape','fv_mean_mape_c','ci85_low','ci85_high','ci90_low','ci90_high','ci95_low','ci95_high']
         base = f"FROM {vname} v JOIN engine.forecast_registry fr ON fr.forecast_name = v.forecast_name WHERE " + " AND ".join(conds)
         sql = f"SELECT {', '.join(cols)} " + base + " ORDER BY date ASC"
 
         def row_iter():
-            headers = ["date","value","ARIMA_M","HWES_M","SES_M","model_name","fv_l","fv","fv_u","fv_mean_mape","fv_interval_odds","fv_interval_sig","fv_variance","fv_variance_mean","fv_mean_mape_c","low","high"]
+            headers = ["forecast_name","date","value","model_name","fv","fv_mape","fv_mean_mape","fv_mean_mape_c","ci85_low","ci85_high","ci90_low","ci90_high","ci95_low","ci95_high"]
             yield (",".join(headers) + "\n").encode("utf-8")
             with conn.cursor() as cur:
                 cur.execute(sql, params)
