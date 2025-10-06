@@ -43,8 +43,8 @@ def _add_months(d: dt.date, n: int) -> dt.date:
 
 def _range_from_month_span(ym: str, span: int):
     span = 1 if span not in (1,2,3) else span
-    start = _ym_first(ym)
-    stop = _add_months(start, span)  # exclusive
+    start = _ym_first(ym) - dt.timedelta(days=7)  # include 7-day pre-roll
+    stop = _add_months(_ym_first(ym), span)       # exclusive
     return start, stop
 
 _HTML = """<!doctype html>
