@@ -10,11 +10,18 @@ from psycopg.rows import dict_row
 
 router = APIRouter(prefix="/views", tags=["views"])
 
-COLS: List[str] = [
-    "forecast_name","date","value","model_name",
+COLS: List[str] = ["forecast_name","date","value","model_name",
     "fv","fv_mape","fv_mean_mape","fv_mean_mape_c",
-    "ci85_low","ci85_high","ci90_low","ci90_high","ci95_low","ci95_high"
-]
+    "ci85_low","ci85_high","ci90_low","ci90_high","ci95_low","ci95_high", "ARIMA_M","HWES_M","SES_M"]
+
+def _select_list(cols: list[str]) -> str:
+    quoted = []
+    for c in cols:
+        if c in ("ARIMA_M","HWES_M","SES_M"):
+            quoted.append(f'"{c}"')
+        else:
+            quoted.append(c)
+    return ", ".join(quoted)
 
 def _db_url() -> str:
     return os.getenv("ENGINE_DATABASE_URL_DIRECT") or os.getenv("ENGINE_DATABASE_URL") or os.getenv("DATABASE_URL") or ""
@@ -124,7 +131,7 @@ def query(payload: Dict):
         raise HTTPException(status_code=400, detail="forecast_name and month are required")
     start, stop = _range_from_month_span(month, span)
     sql = f"""
-        SELECT {', '.join(COLS)}
+        SELECT {_select_list(COLS)}
         FROM engine.tsf_vw_full
         WHERE forecast_name = %s
           AND date >= %s AND date < %s
@@ -139,7 +146,7 @@ def query(payload: Dict):
 def export(forecast_name: str, month: str, span: int = 1):
     start, stop = _range_from_month_span(month, int(span))
     sql = f"""
-        SELECT {', '.join(COLS)}
+        SELECT {_select_list(COLS)}
         FROM engine.tsf_vw_full
         WHERE forecast_name = %s
           AND date >= %s AND date < %s
