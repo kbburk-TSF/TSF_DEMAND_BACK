@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # Import routers from the proper package paths
 from backend.routes import views as _views
 from backend.routes import tsfview as _tsfview
+from backend.routes import walmart_dashboard as _walmart_dashboard
 
 app = FastAPI(title="TSF Backend")
 
@@ -23,6 +24,7 @@ app.add_middleware(
 # Mount routers
 app.include_router(_views.router)
 app.include_router(_tsfview.router)
+app.include_router(_walmart_dashboard.router)
 
 @app.get("/", include_in_schema=False)
 def root():
