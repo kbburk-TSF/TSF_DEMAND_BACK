@@ -12,11 +12,10 @@ from psycopg.rows import dict_row
 
 router = APIRouter(prefix="/api/walmart", tags=["walmart-dashboard"])
 
-# Neon database connection
-WALMART_DATABASE_URL = os.getenv(
-    "WALMART_DATABASE_URL",
-    "postgresql://neondb_owner:npg_Pu2KwCRjciN5@ep-royal-moon-ahdvav0m-pooler.c-3.us-east-1.aws.neon.tech/neondb?sslmode=require"
-)
+# Neon database connection - MUST be set in environment
+WALMART_DATABASE_URL = os.getenv("WALMART_DATABASE_URL")
+if not WALMART_DATABASE_URL:
+    raise RuntimeError("WALMART_DATABASE_URL environment variable is required")
 
 
 def _connect():
