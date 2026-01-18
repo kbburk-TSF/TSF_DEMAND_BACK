@@ -110,15 +110,46 @@ def get_band_breaks_from_rows(rows: List[Dict], week_date: date) -> Dict:
 # API ENDPOINTS
 # =============================================================================
 
+def get_weeks_in_range(start_date, end_date):
+    """Get all week-ending Saturdays in a date range."""
+    weeks = []
+    if isinstance(start_date, str):
+        current = datetime.strptime(start_date, '%Y-%m-%d')
+    else:
+        current = datetime.combine(start_date, datetime.min.time())
+    if isinstance(end_date, str):
+        end = datetime.strptime(end_date, '%Y-%m-%d')
+    else:
+        end = datetime.combine(end_date, datetime.min.time())
+    
+    # Find first Saturday
+    days_until_saturday = (5 - current.weekday()) % 7
+    if days_until_saturday == 0 and current.weekday() != 5:
+        days_until_saturday = 7
+    current = current + timedelta(days=days_until_saturday)
+    
+    while current <= end:
+        weeks.append(current.strftime('%Y-%m-%d'))
+        current += timedelta(days=7)
+    
+    return weeks
+
+
 @router.get("/weeks")
 def get_weeks(forecast_type: str = "monthly"):
-    """Get available weeks for the forecast type."""
+    """Get available weeks (Saturdays) for the forecast type."""
     table = f"walmart_aggregate_{forecast_type}"
     with _connect() as conn:
         with conn.cursor() as cur:
-            cur.execute(f'SELECT DISTINCT date FROM "{table}" ORDER BY date')
-            dates = [to_date(row[0]).isoformat() for row in cur.fetchall()]
-    return dates
+            cur.execute(f'SELECT MIN(date), MAX(date) FROM "{table}"')
+            row = cur.fetchone()
+    
+    if row and row[0] and row[1]:
+        start_date = to_date(row[0])
+        end_date = to_date(row[1])
+        return get_weeks_in_range(start_date, end_date)
+    
+    return []
 
 
 @router.get("/geo-ids")
