@@ -41,15 +41,38 @@ def to_date(val):
 
 
 def get_period_range(week: str, forecast_type: str):
-    """Get the date range for charts based on forecast type."""
+    """Get period start and end dates for chart display.
+    Includes extra week before and after to ensure both actuals and forecast visible."""
     week_date = to_date(week)
-    if forecast_type == 'monthly':
-        start = week_date - timedelta(days=45)
-        end = week_date + timedelta(days=15)
+    if isinstance(week_date, date) and not isinstance(week_date, datetime):
+        week_dt = datetime.combine(week_date, datetime.min.time())
     else:
-        start = week_date - timedelta(days=120)
-        end = week_date + timedelta(days=30)
-    return start, end
+        week_dt = week_date
+    
+    if forecast_type == 'monthly':
+        # Start: first day of month minus 7 days (last week of prev month)
+        month_start = week_dt.replace(day=1).date()
+        period_start = month_start - timedelta(days=7)
+        
+        # End: last day of month plus 7 days (first week of next month)
+        if week_dt.month == 12:
+            month_end = (week_dt.replace(year=week_dt.year + 1, month=1, day=1) - timedelta(days=1)).date()
+        else:
+            month_end = (week_dt.replace(month=week_dt.month + 1, day=1) - timedelta(days=1)).date()
+        period_end = month_end + timedelta(days=7)
+    else:
+        # Quarterly
+        quarter = (week_dt.month - 1) // 3
+        quarter_start = week_dt.replace(month=quarter * 3 + 1, day=1).date()
+        period_start = quarter_start - timedelta(days=7)  # Extra week before
+        
+        if quarter == 3:
+            quarter_end = (week_dt.replace(year=week_dt.year + 1, month=1, day=1) - timedelta(days=1)).date()
+        else:
+            quarter_end = (week_dt.replace(month=(quarter + 1) * 3 + 1, day=1) - timedelta(days=1)).date()
+        period_end = quarter_end + timedelta(days=7)  # Extra week after
+    
+    return period_start, period_end
 
 
 def get_band_breaks(rows: List[Dict], week_date: date) -> Dict:
